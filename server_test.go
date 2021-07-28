@@ -131,7 +131,7 @@ func startServer() {
 	var l net.Listener
 	l, serverAddr = listenTCP()
 	log.Println("Test RPC server listening on", serverAddr)
-	go Accept(l)
+	go Accept(context.Background(), l)
 
 	HandleHTTP()
 	httpOnce.Do(startHttpServer)
@@ -147,7 +147,7 @@ func startNewServer() {
 	var l net.Listener
 	l, newServerAddr = listenTCP()
 	log.Println("NewServer test RPC server listening on", newServerAddr)
-	go newServer.Accept(l)
+	go newServer.Accept(context.Background(), l)
 
 	newServer.HandleHTTP(newHttpPath, "/bar")
 	httpOnce.Do(startHttpServer)
@@ -556,13 +556,13 @@ func (codec *CodecEmulator) Call(ctx context.Context, serviceMethod string, args
 	return codec.err
 }
 
-func (codec *CodecEmulator) ReadRequestHeader(req *Request) error {
+func (codec *CodecEmulator) ReadRequestHeader(ctx context.Context, req *Request) error {
 	req.ServiceMethod = codec.serviceMethod
 	req.Seq = 0
 	return nil
 }
 
-func (codec *CodecEmulator) ReadRequestBody(argv interface{}) error {
+func (codec *CodecEmulator) ReadRequestBody(ctx context.Context, argv interface{}) error {
 	if codec.args == nil {
 		return io.ErrUnexpectedEOF
 	}
@@ -570,7 +570,7 @@ func (codec *CodecEmulator) ReadRequestBody(argv interface{}) error {
 	return nil
 }
 
-func (codec *CodecEmulator) WriteResponse(resp *Response, reply interface{}) error {
+func (codec *CodecEmulator) WriteResponse(ctx context.Context, resp *Response, reply interface{}) error {
 	if resp.Error != "" {
 		codec.err = errors.New(resp.Error)
 	} else {
@@ -845,7 +845,7 @@ func TestAcceptExitAfterListenerClose(t *testing.T) {
 	var l net.Listener
 	l, _ = listenTCP()
 	l.Close()
-	newServer.Accept(l)
+	newServer.Accept(context.Background(), l)
 }
 
 func TestShutdown(t *testing.T) {
@@ -871,7 +871,7 @@ func TestShutdown(t *testing.T) {
 
 	newServer := NewServer()
 	newServer.Register(new(Arith))
-	go newServer.ServeConn(c1)
+	go newServer.ServeConn(context.Background(), c1)
 
 	ctx := context.Background()
 	args := &Args{7, 8}

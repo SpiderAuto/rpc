@@ -68,7 +68,7 @@ func TestGobError(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	go Accept(listen)
+	go Accept(context.Background(), listen)
 
 	client, err := Dial("tcp", listen.Addr().String())
 	if err != nil {

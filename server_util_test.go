@@ -11,6 +11,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -66,7 +67,7 @@ type jsonServerResponse struct {
 	Error  interface{}      `json:"error"`
 }
 
-func (c *jsonServerCodec) ReadRequestHeader(r *Request) error {
+func (c *jsonServerCodec) ReadRequestHeader(ctx context.Context, r *Request) error {
 	c.req.reset()
 	if err := c.dec.Decode(&c.req); err != nil {
 		return err
@@ -86,7 +87,7 @@ func (c *jsonServerCodec) ReadRequestHeader(r *Request) error {
 	return nil
 }
 
-func (c *jsonServerCodec) ReadRequestBody(x interface{}) error {
+func (c *jsonServerCodec) ReadRequestBody(ctx context.Context, x interface{}) error {
 	if x == nil {
 		return nil
 	}
@@ -104,7 +105,7 @@ func (c *jsonServerCodec) ReadRequestBody(x interface{}) error {
 
 var null = json.RawMessage([]byte("null"))
 
-func (c *jsonServerCodec) WriteResponse(r *Response, x interface{}) error {
+func (c *jsonServerCodec) WriteResponse(ctx context.Context, r *Response, x interface{}) error {
 	c.mutex.Lock()
 	b, ok := c.pending[r.Seq]
 	if !ok {

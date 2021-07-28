@@ -366,7 +366,7 @@ func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 // contains an error when it is used.
 var invalidRequest = struct{}{}
 
-func (server *Server) sendResponse(sending *sync.Mutex, req *Request, reply interface{}, codec ServerCodec, errmsg string) {
+func (server *Server) sendResponse(ctx context.Context, sending *sync.Mutex, req *Request, reply interface{}, codec ServerCodec, errmsg string) {
 	resp := server.getResponse()
 	// Encode the response header
 	resp.ServiceMethod = req.ServiceMethod
@@ -376,7 +376,7 @@ func (server *Server) sendResponse(sending *sync.Mutex, req *Request, reply inte
 	}
 	resp.Seq = req.Seq
 	sending.Lock()
-	err := codec.WriteResponse(resp, reply)
+	err := codec.WriteResponse(ctx, resp, reply)
 	if debugLog && err != nil {
 		log.Println("rpc: writing response:", err)
 	}
@@ -416,7 +416,7 @@ func (s *service) call(server *Server, sending *sync.Mutex, pending *svc.Pending
 	if errInter != nil {
 		errmsg = errInter.(error).Error()
 	}
-	server.sendResponse(sending, req, replyv.Interface(), codec, errmsg)
+	server.sendResponse(ctx, sending, req, replyv.Interface(), codec, errmsg)
 	server.freeRequest(req)
 }
 
@@ -428,15 +428,15 @@ type gobServerCodec struct {
 	closed bool
 }
 
-func (c *gobServerCodec) ReadRequestHeader(r *Request) error {
+func (c *gobServerCodec) ReadRequestHeader(ctx context.Context, r *Request) error {
 	return c.dec.Decode(r)
 }
 
-func (c *gobServerCodec) ReadRequestBody(body interface{}) error {
+func (c *gobServerCodec) ReadRequestBody(ctx context.Context, body interface{}) error {
 	return c.dec.Decode(body)
 }
 
-func (c *gobServerCodec) WriteResponse(r *Response, body interface{}) (err error) {
+func (c *gobServerCodec) WriteResponse(ctx context.Context, r *Response, body interface{}) (err error) {
 	if err = c.enc.Encode(r); err != nil {
 		if c.encBuf.Flush() == nil {
 			// Gob couldn't encode the header. Should not happen, so if it does,
@@ -473,7 +473,7 @@ func (c *gobServerCodec) Close() error {
 // ServeConn uses the gob wire format (see package gob) on the
 // connection. To use an alternate codec, use ServeCodec.
 // See NewClient's comment for information about concurrent access.
-func (server *Server) ServeConn(conn io.ReadWriteCloser) {
+func (server *Server) ServeConn(ctx context.Context, conn io.ReadWriteCloser) {
 	buf := bufio.NewWriter(conn)
 	srv := &gobServerCodec{
 		rwc:    conn,
@@ -481,19 +481,19 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 		enc:    gob.NewEncoder(buf),
 		encBuf: buf,
 	}
-	server.ServeCodec(srv)
+	server.ServeCodec(ctx, srv)
 }
 
 // ServeCodec is like ServeConn but uses the specified codec to
 // decode requests and encode responses.
-func (server *Server) ServeCodec(codec ServerCodec) {
+func (server *Server) ServeCodec(ctx context.Context, codec ServerCodec) {
 	sending := new(sync.Mutex)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pending := svc.NewPending(ctx)
 	wg := new(sync.WaitGroup)
 	for {
-		service, mtype, req, argv, replyv, keepReading, err := server.readRequest(codec)
+		service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
 		if err != nil {
 			if debugLog && err != io.EOF {
 				log.Println("rpc:", err)
@@ -503,7 +503,7 @@ func (server *Server) ServeCodec(codec ServerCodec) {
 			}
 			// send a response if we actually managed to read a header.
 			if req != nil {
-				server.sendResponse(sending, req, invalidRequest, codec, err.Error())
+				server.sendResponse(ctx, sending, req, invalidRequest, codec, err.Error())
 				server.freeRequest(req)
 			}
 			continue
@@ -531,14 +531,14 @@ func (server *Server) ServeRequest(codec ServerCodec) error {
 func (server *Server) ServeRequestContext(ctx context.Context, codec ServerCodec) error {
 	sending := new(sync.Mutex)
 	pending := svc.NewPending(ctx)
-	service, mtype, req, argv, replyv, keepReading, err := server.readRequest(codec)
+	service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
 	if err != nil {
 		if !keepReading {
 			return err
 		}
 		// send a response if we actually managed to read a header.
 		if req != nil {
-			server.sendResponse(sending, req, invalidRequest, codec, err.Error())
+			server.sendResponse(ctx, sending, req, invalidRequest, codec, err.Error())
 			server.freeRequest(req)
 		}
 		return err
@@ -587,14 +587,14 @@ func (server *Server) freeResponse(resp *Response) {
 	server.respLock.Unlock()
 }
 
-func (server *Server) readRequest(codec ServerCodec) (service *service, mtype *methodType, req *Request, argv, replyv reflect.Value, keepReading bool, err error) {
-	service, mtype, req, keepReading, err = server.readRequestHeader(codec)
+func (server *Server) readRequest(ctx context.Context, codec ServerCodec) (service *service, mtype *methodType, req *Request, argv, replyv reflect.Value, keepReading bool, err error) {
+	service, mtype, req, keepReading, err = server.readRequestHeader(ctx, codec)
 	if err != nil {
 		if !keepReading {
 			return
 		}
 		// discard body
-		codec.ReadRequestBody(nil)
+		codec.ReadRequestBody(ctx, nil)
 		return
 	}
 
@@ -607,7 +607,7 @@ func (server *Server) readRequest(codec ServerCodec) (service *service, mtype *m
 		argIsValue = true
 	}
 	// argv guaranteed to be a pointer now.
-	if err = codec.ReadRequestBody(argv.Interface()); err != nil {
+	if err = codec.ReadRequestBody(ctx, argv.Interface()); err != nil {
 		return
 	}
 	if argIsValue {
@@ -625,10 +625,10 @@ func (server *Server) readRequest(codec ServerCodec) (service *service, mtype *m
 	return
 }
 
-func (server *Server) readRequestHeader(codec ServerCodec) (svc *service, mtype *methodType, req *Request, keepReading bool, err error) {
+func (server *Server) readRequestHeader(ctx context.Context, codec ServerCodec) (svc *service, mtype *methodType, req *Request, keepReading bool, err error) {
 	// Grab the request header.
 	req = server.getRequest()
-	err = codec.ReadRequestHeader(req)
+	err = codec.ReadRequestHeader(ctx, req)
 	if err != nil {
 		req = nil
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -668,14 +668,14 @@ func (server *Server) readRequestHeader(codec ServerCodec) (svc *service, mtype 
 // for each incoming connection. Accept blocks until the listener
 // returns a non-nil error. The caller typically invokes Accept in a
 // go statement.
-func (server *Server) Accept(lis net.Listener) {
+func (server *Server) Accept(ctx context.Context, lis net.Listener) {
 	for {
 		conn, err := lis.Accept()
 		if err != nil {
 			log.Print("rpc.Serve: accept:", err.Error())
 			return
 		}
-		go server.ServeConn(conn)
+		go server.ServeConn(ctx, conn)
 	}
 }
 
@@ -697,9 +697,9 @@ func RegisterName(name string, rcvr interface{}) error {
 // argument to force the body of the request to be read and discarded.
 // See NewClient's comment for information about concurrent access.
 type ServerCodec interface {
-	ReadRequestHeader(*Request) error
-	ReadRequestBody(interface{}) error
-	WriteResponse(*Response, interface{}) error
+	ReadRequestHeader(context.Context, *Request) error
+	ReadRequestBody(context.Context, interface{}) error
+	WriteResponse(context.Context, *Response, interface{}) error
 
 	// Close can be called multiple times and must be idempotent.
 	Close() error
@@ -711,14 +711,14 @@ type ServerCodec interface {
 // ServeConn uses the gob wire format (see package gob) on the
 // connection. To use an alternate codec, use ServeCodec.
 // See NewClient's comment for information about concurrent access.
-func ServeConn(conn io.ReadWriteCloser) {
-	DefaultServer.ServeConn(conn)
+func ServeConn(ctx context.Context, conn io.ReadWriteCloser) {
+	DefaultServer.ServeConn(ctx, conn)
 }
 
 // ServeCodec is like ServeConn but uses the specified codec to
 // decode requests and encode responses.
-func ServeCodec(codec ServerCodec) {
-	DefaultServer.ServeCodec(codec)
+func ServeCodec(ctx context.Context, codec ServerCodec) {
+	DefaultServer.ServeCodec(ctx, codec)
 }
 
 // ServeRequest is like ServeCodec but synchronously serves a single request.
@@ -739,7 +739,7 @@ func ServeRequestContext(ctx context.Context, codec ServerCodec) error {
 // Accept accepts connections on the listener and serves requests
 // to DefaultServer for each incoming connection.
 // Accept blocks; the caller typically invokes it in a go statement.
-func Accept(lis net.Listener) { DefaultServer.Accept(lis) }
+func Accept(ctx context.Context, lis net.Listener) { DefaultServer.Accept(ctx, lis) }
 
 // Can connect to RPC service using HTTP CONNECT to rpcPath.
 var connected = "200 Connected to Go RPC"
@@ -757,7 +757,7 @@ func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
 	}
 	io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
-	server.ServeConn(conn)
+	server.ServeConn(context.TODO(), conn)
 }
 
 // HandleHTTP registers an HTTP handler for RPC messages on rpcPath,
