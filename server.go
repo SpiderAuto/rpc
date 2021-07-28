@@ -152,8 +152,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-
-	"github.com/keegancsmith/rpc/internal/svc"
 )
 
 const (
@@ -212,9 +210,7 @@ type Server struct {
 
 // NewServer returns a new Server.
 func NewServer() *Server {
-	s := &Server{}
-	s.RegisterName("_goRPC_", &svc.GoRPC{})
-	return s
+	return &Server{}
 }
 
 // DefaultServer is the default instance of *Server.
@@ -391,22 +387,14 @@ func (m *methodType) NumCalls() (n uint) {
 	return n
 }
 
-func (s *service) call(server *Server, sending *sync.Mutex, pending *svc.Pending, wg *sync.WaitGroup, mtype *methodType, req *Request, argv, replyv reflect.Value, codec ServerCodec) {
+func (s *service) call(ctx context.Context, server *Server, sending *sync.Mutex, wg *sync.WaitGroup, mtype *methodType, req *Request, argv, replyv reflect.Value, codec ServerCodec) {
 	if wg != nil {
 		defer wg.Done()
 	}
-	// _goRPC_ service calls require internal state.
-	if s.name == "_goRPC_" {
-		switch v := argv.Interface().(type) {
-		case *svc.CancelArgs:
-			v.SetPending(pending)
-		}
-	}
+
 	mtype.Lock()
 	mtype.numCalls++
 	mtype.Unlock()
-	ctx := pending.Start(req.Seq)
-	defer pending.Cancel(req.Seq)
 	function := mtype.method.Func
 	// Invoke the method, providing a new value for the reply.
 	returnValues := function.Call([]reflect.Value{s.rcvr, reflect.ValueOf(ctx), argv, replyv})
@@ -428,8 +416,8 @@ type gobServerCodec struct {
 	closed bool
 }
 
-func (c *gobServerCodec) ReadRequestHeader(ctx context.Context, r *Request) error {
-	return c.dec.Decode(r)
+func (c *gobServerCodec) ReadRequestHeader(ctx context.Context, r *Request) (context.Context, error) {
+	return ctx, c.dec.Decode(r)
 }
 
 func (c *gobServerCodec) ReadRequestBody(ctx context.Context, body interface{}) error {
@@ -490,10 +478,9 @@ func (server *Server) ServeCodec(ctx context.Context, codec ServerCodec) {
 	sending := new(sync.Mutex)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pending := svc.NewPending(ctx)
 	wg := new(sync.WaitGroup)
 	for {
-		service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
+		ctx, service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
 		if err != nil {
 			if debugLog && err != io.EOF {
 				log.Println("rpc:", err)
@@ -509,7 +496,7 @@ func (server *Server) ServeCodec(ctx context.Context, codec ServerCodec) {
 			continue
 		}
 		wg.Add(1)
-		go service.call(server, sending, pending, wg, mtype, req, argv, replyv, codec)
+		go service.call(ctx, server, sending, wg, mtype, req, argv, replyv, codec)
 	}
 	// We've seen that there are no more requests.
 	// Wait for responses to be sent before closing codec.
@@ -519,19 +506,11 @@ func (server *Server) ServeCodec(ctx context.Context, codec ServerCodec) {
 
 // ServeRequest is like ServeCodec but synchronously serves a single request.
 // It does not close the codec upon completion.
-func (server *Server) ServeRequest(codec ServerCodec) error {
-	return server.ServeRequestContext(context.Background(), codec)
-}
-
 // ServeRequest is like ServeCodec but synchronously serves a single request.
 // It does not close the codec upon completion.
-//
-// Cancelling the context given here will propagate cancellation to the context
-// of the called function.
-func (server *Server) ServeRequestContext(ctx context.Context, codec ServerCodec) error {
+func (server *Server) ServeRequest(ctx context.Context, codec ServerCodec) error {
 	sending := new(sync.Mutex)
-	pending := svc.NewPending(ctx)
-	service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
+	ctx, service, mtype, req, argv, replyv, keepReading, err := server.readRequest(ctx, codec)
 	if err != nil {
 		if !keepReading {
 			return err
@@ -543,9 +522,10 @@ func (server *Server) ServeRequestContext(ctx context.Context, codec ServerCodec
 		}
 		return err
 	}
-	service.call(server, sending, pending, nil, mtype, req, argv, replyv, codec)
+	service.call(ctx, server, sending, nil, mtype, req, argv, replyv, codec)
 	return nil
 }
+
 
 func (server *Server) getRequest() *Request {
 	server.reqLock.Lock()
@@ -587,8 +567,8 @@ func (server *Server) freeResponse(resp *Response) {
 	server.respLock.Unlock()
 }
 
-func (server *Server) readRequest(ctx context.Context, codec ServerCodec) (service *service, mtype *methodType, req *Request, argv, replyv reflect.Value, keepReading bool, err error) {
-	service, mtype, req, keepReading, err = server.readRequestHeader(ctx, codec)
+func (server *Server) readRequest(ctx context.Context, codec ServerCodec) (ctx2 context.Context, service *service, mtype *methodType, req *Request, argv, replyv reflect.Value, keepReading bool, err error) {
+	ctx2, service, mtype, req, keepReading, err = server.readRequestHeader(ctx, codec)
 	if err != nil {
 		if !keepReading {
 			return
@@ -625,10 +605,10 @@ func (server *Server) readRequest(ctx context.Context, codec ServerCodec) (servi
 	return
 }
 
-func (server *Server) readRequestHeader(ctx context.Context, codec ServerCodec) (svc *service, mtype *methodType, req *Request, keepReading bool, err error) {
+func (server *Server) readRequestHeader(ctx context.Context, codec ServerCodec) (ctx2 context.Context, svc *service, mtype *methodType, req *Request, keepReading bool, err error) {
 	// Grab the request header.
 	req = server.getRequest()
-	err = codec.ReadRequestHeader(ctx, req)
+	ctx2, err = codec.ReadRequestHeader(ctx, req)
 	if err != nil {
 		req = nil
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -697,7 +677,7 @@ func RegisterName(name string, rcvr interface{}) error {
 // argument to force the body of the request to be read and discarded.
 // See NewClient's comment for information about concurrent access.
 type ServerCodec interface {
-	ReadRequestHeader(context.Context, *Request) error
+	ReadRequestHeader(context.Context, *Request) (context.Context, error)
 	ReadRequestBody(context.Context, interface{}) error
 	WriteResponse(context.Context, *Response, interface{}) error
 
@@ -723,17 +703,8 @@ func ServeCodec(ctx context.Context, codec ServerCodec) {
 
 // ServeRequest is like ServeCodec but synchronously serves a single request.
 // It does not close the codec upon completion.
-func ServeRequest(codec ServerCodec) error {
-	return ServeRequestContext(context.Background(), codec)
-}
-
-// ServeRequest is like ServeCodec but synchronously serves a single request.
-// It does not close the codec upon completion.
-//
-// Cancelling the context given here will propagate cancellation to the context
-// of the called function.
-func ServeRequestContext(ctx context.Context, codec ServerCodec) error {
-	return DefaultServer.ServeRequestContext(ctx, codec)
+func ServeRequest(ctx context.Context, codec ServerCodec) error {
+	return DefaultServer.ServeRequest(ctx, codec)
 }
 
 // Accept accepts connections on the listener and serves requests
