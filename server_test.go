@@ -666,16 +666,16 @@ func TestRegistrationError(t *testing.T) {
 
 type WriteFailCodec int
 
-func (WriteFailCodec) WriteRequest(*Request, interface{}) error {
+func (WriteFailCodec) WriteRequest(context.Context, *Request, interface{}) error {
 	// the panic caused by this error used to not unlock a lock.
 	return errors.New("fail")
 }
 
-func (WriteFailCodec) ReadResponseHeader(*Response) error {
+func (WriteFailCodec) ReadResponseHeader(context.Context, *Response) error {
 	select {}
 }
 
-func (WriteFailCodec) ReadResponseBody(interface{}) error {
+func (WriteFailCodec) ReadResponseBody(context.Context, interface{}) error {
 	select {}
 }
 

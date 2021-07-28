@@ -18,9 +18,9 @@ type shutdownCodec struct {
 	closed    bool
 }
 
-func (c *shutdownCodec) WriteRequest(*Request, interface{}) error { return nil }
-func (c *shutdownCodec) ReadResponseBody(interface{}) error       { return nil }
-func (c *shutdownCodec) ReadResponseHeader(*Response) error {
+func (c *shutdownCodec) WriteRequest(context.Context, *Request, interface{}) error { return nil }
+func (c *shutdownCodec) ReadResponseBody(context.Context, interface{}) error       { return nil }
+func (c *shutdownCodec) ReadResponseHeader(context.Context, *Response) error {
 	c.responded <- 1
 	return errors.New("shutdownCodec ReadResponseHeader")
 }
@@ -91,13 +91,13 @@ type ClientCodecError struct {
 	WriteRequestError error
 }
 
-func (c *ClientCodecError) WriteRequest(*Request, interface{}) error {
+func (c *ClientCodecError) WriteRequest(context.Context, *Request, interface{}) error {
 	return c.WriteRequestError
 }
-func (c *ClientCodecError) ReadResponseHeader(*Response) error {
+func (c *ClientCodecError) ReadResponseHeader(context.Context, *Response) error {
 	return nil
 }
-func (c *ClientCodecError) ReadResponseBody(interface{}) error {
+func (c *ClientCodecError) ReadResponseBody(context.Context, interface{}) error {
 	return nil
 }
 func (c *ClientCodecError) Close() error {
